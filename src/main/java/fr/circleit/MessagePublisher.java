@@ -7,24 +7,20 @@ import com.rabbitmq.client.MessageProperties;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 
 public class MessagePublisher {
     private final ConnectionFactory factory;
     private Connection connection;
-    private ThreadLocal<Channel> publishChannel = new ThreadLocal<>();
-    private final ConcurrentNavigableMap<Long, String> outstandingConfirms = new ConcurrentSkipListMap<>();
+    private ThreadLocal<MessagePublisherChannel> publishChannel = new ThreadLocal<>();
 
     public MessagePublisher() {
         this.factory = new ConnectionFactory();
         factory.setHost("localhost");
-        factory.setUsername("admin");
-        factory.setPassword("password");
+        factory.setUsername("guest");
+        factory.setPassword("guest");
         factory.setPort(5672);
     }
 
@@ -41,10 +37,10 @@ public class MessagePublisher {
     ) {
         String routingKey = "sample-route";
         try {
-            Channel channel = getPublishChannel(onSucceededPublish, onFailedPublish);
-            long sequenceNumber = channel.getNextPublishSeqNo();
-            outstandingConfirms.put(sequenceNumber, message);
-            channel.basicPublish(
+            MessagePublisherChannel mpc = getPublishChannel(onSucceededPublish, onFailedPublish);
+            mpc.trackMessage(message);
+            Channel ch = mpc.getChannel();
+            ch.basicPublish(
                 "",
                 routingKey,
                 MessageProperties.PERSISTENT_BASIC,
@@ -55,36 +51,22 @@ public class MessagePublisher {
         }
     }
 
-    private Channel getPublishChannel(
+    private MessagePublisherChannel getPublishChannel(
         Consumer<List<String>> onSucceededPublish, Consumer<List<String>> onFailedPublish
     ) throws IOException, TimeoutException {
         if (publishChannel.get() == null) {
             Channel channel = getConnection().createChannel();
             channel.confirmSelect(); // channel with ack
+            MessagePublisherChannel mpc = new MessagePublisherChannel(channel);
             channel.addConfirmListener((sequenceNumber, multiple) -> {
-                List<String> acked = cleanOutstandingConfirms(sequenceNumber, multiple);
+                List<String> acked = mpc.cleanOutstandingConfirms(sequenceNumber, multiple);
                 onSucceededPublish.accept(acked);
             }, (sequenceNumber, multiple) -> {
-                List<String> nacked = cleanOutstandingConfirms(sequenceNumber, multiple);
+                List<String> nacked = mpc.cleanOutstandingConfirms(sequenceNumber, multiple);
                 onFailedPublish.accept(nacked);
             });
-            publishChannel.set(channel);
+            publishChannel.set(mpc);
         }
         return publishChannel.get();
     }
-
-    private List<String> cleanOutstandingConfirms(long sequenceNumber, boolean multiple) {
-        List<String> notifsConfirmed;
-        if (multiple) {
-            ConcurrentNavigableMap<Long, String> confirmed = outstandingConfirms.headMap(sequenceNumber, true);
-            notifsConfirmed = new ArrayList<>(confirmed.values());
-            confirmed.clear();
-        } else {
-            String confirmed = outstandingConfirms.remove(sequenceNumber);
-            notifsConfirmed = List.of(confirmed);
-        }
-        return notifsConfirmed;
-    }
-
-
 }

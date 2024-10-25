@@ -1,4 +1,8 @@
+.classpath
 .idea
+.project
+.settings/
+target/
 
 # Compiled class file
 *.class
